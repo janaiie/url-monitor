@@ -1,0 +1,182 @@
+import java.io.BufferedReader;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.*;
+import javax.net.ssl.SSLSocketFactory;
+
+
+public class monitor {
+
+  // Main method
+	public static void main(String[] args) {
+	    if(args.length != 1) {
+    	    System.out.println("Usage: monitor urls_file");
+    	    System.exit(1);
+	    }
+	    
+	    String urlsFile = args[0];
+	    try(BufferedReader urlReader = new BufferedReader(new FileReader(urlsFile))){
+  	    	String url;
+  	    	while((url = urlReader.readLine())!= null) {
+  	    		   mainHelper(url,"URL",true);// Process each URL
+  	    	}
+  	  }catch(FileNotFoundException e) {
+  	    	  System.out.println(urlsFile + "not found");
+  	  }catch(IOException e) {
+  	        e.printStackTrace(); // Handle other IO exceptions
+  	  }
+	}
+	
+	// Checks if the response indicates a redirection by looking for the "Location" header
+	private static boolean redirected(String line) {
+	    return (line.contains("Location:"));  
+	}
+
+  // Checks if the response contains an image reference.
+	private static boolean containsMedia(String line) {
+	    return (line.contains("<img src"));  
+	}
+
+  // Removes quotation marks from a string
+	private static String removeQuotes(String line) {
+  		String newStr = "";
+  		for(int i = 0; i < line.length(); i++) {
+  			    if (line.charAt(i) != '"') {
+  			        newStr += line.charAt(i);
+  			    }
+  		}
+  		return newStr;
+  	}
+
+  // Constructs the host name from the URL's components.
+	private static String constructHost(String[] urlArray) {
+		  int urlRemainderLen = urlArray[1].length();
+		  String hostName = "";
+
+  		for(int i = 0; i < urlRemainderLen; i++) {
+  			  if(urlArray[1].charAt(i) != ('/')) {
+  			      hostName += urlArray[1].charAt(i);
+  			  }
+  			  else {
+  			      break;
+  			  }
+  		}
+  		return hostName;	
+  	}
+	
+	// Constructs the path from the URL by removing the host name portion.
+	private static String constructPath(String[] urlArray,String hostName) {	
+	    String path = urlArray[1].substring(hostName.length());
+		  if(path == "") {
+			    path +='/';
+		  }
+		  return  path;
+	 }
+	
+	 // Determines the port number based on the protocol (HTTP or HTTPS)
+	 private static int portNum(String[] urlArray) {
+	     String protocol = urlArray[0];
+	     return protocol.equalsIgnoreCase("http") ? 80 : 443;
+	 }
+
+  // Checks if the URL uses a secure protocol (HTTPS).
+	private static boolean isProtected(String[] urlArray) {
+	    String protocol = urlArray[0];
+      return protocol.equalsIgnoreCase("https");
+		
+	}
+
+  // Creates a socket for communication with the server, using SSL for HTTPS.
+	private static Socket makeSocket(String[] urlArray, String hostName, int serverPort) throws IOException, UnknownHostException{
+		  if(isProtected(urlArray)) {
+			    SSLSocketFactory socketFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+			    return socketFactory.createSocket(hostName,serverPort);
+		  }
+		  return new Socket(hostName, serverPort);
+	}
+
+   //helper method to handle the logic for processing and outputting URL statuses.
+	 private static void mainHelper(String url,String urlSpecs, boolean isInitialURL) {
+	      String[] urlArray = url.split("://");
+    		int serverPort = portNum(urlArray);
+    		String hostName = constructHost(urlArray);
+    		String path = constructPath(urlArray,hostName);
+    		Socket clientSocket = null;
+    		
+    		try {
+    		    clientSocket = makeSocket(urlArray, hostName, serverPort); // Establish a connection					
+    		}catch(IOException e) {
+    				System.out.println(urlSpecs + ":"  + urlArray[0] + "://" + e.getMessage());
+			      System.out.println("Status: Network error");
+			      return;
+    		}
+    		
+    		if(clientSocket != null) {
+    		    try {
+	    			    OutputStream oStream = clientSocket.getOutputStream();
+	    			    String request = "GET " + path + " HTTP/1.0\r\n" +  
+			                             "Host: " + hostName + "\r\n" + "\r\n";
+	    			    oStream.write(request.getBytes());
+	    			    oStream.flush();
+	    			
+	    			    InputStream iStream = clientSocket.getInputStream();
+	    			    BufferedReader serverReader = new BufferedReader(new InputStreamReader(iStream)); 
+	    			    String rawResponse;
+	    			
+	    			    StringBuilder responseBuilder = new StringBuilder();
+	    			    String initialPageStatus = null;
+	    				
+	    			    while((rawResponse = serverReader.readLine()) != null) {
+                                      
+	    				      if(initialPageStatus == null) {
+	    					        initialPageStatus = rawResponse.substring(9);       
+	    					        if(isInitialURL) {
+	    					    	      responseBuilder.append("\n");
+	    					        }
+	    						      responseBuilder.append(urlSpecs).append(":").append(urlArray[0]).append("://").append(hostName).append(path).append("\n");
+	    						      responseBuilder.append("Status: ").append(initialPageStatus).append("\n");
+	    						      System.out.print(responseBuilder.toString());
+	    				}
+	    					
+	    				if(redirected(rawResponse)) {
+  	    					String newURL = rawResponse.substring(10); // Extract new URL
+  	    					mainHelper(newURL, "Redirected URL",false);  // Follow redirection
+  	    					return;
+	    				}
+	    				
+	    				if(containsMedia(rawResponse)) {
+  	    					int imgPathSplit = rawResponse.indexOf(" alt");
+      						String imgURL= rawResponse.substring(10,imgPathSplit);
+      						imgURL = removeQuotes(imgURL);
+  	   
+  	    					
+  	    					if(rawResponse.contains(hostName)) {
+  	    						  mainHelper(imgURL, "Referenced URL",false);
+  	    					}else {
+    	    						int urlSplit = url.indexOf("page.html");
+    	    						String referencedURLPartial = url.substring(0,urlSplit-1);
+    	    						String referencedURL = referencedURLPartial + imgURL;
+    	    						mainHelper(referencedURL,"Referenced URL",false);
+  	    					}
+  	    					return;
+  	    				}	
+	    			}
+	    		}catch(IOException e){
+	    			    System.out.println(urlSpecs + ":"  + urlArray[0] + "://" + e.getMessage());
+    			      System.out.println("Status: Network error");
+	    		}finally {
+	    		    try {
+	    			      clientSocket.close();
+	    			}catch (IOException e){
+	    				    System.out.println("Status: Network error");
+	    			}
+	    		}
+    		 }
+	  }
+	}
+	
+	
